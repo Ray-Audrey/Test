@@ -1,0 +1,272 @@
+Since your backend has no login yet, I added a tiny session-based one using Spring’s HttpSession. The frontend uses Pinia for state and Vue Router with a login guard.
+
+Backend changes
+
+Add AuthController.java (hardcoded user for simplicity):
+java
+package org.example.proj1.controller;
+
+import jakarta.servlet.http.HttpSession;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/auth")
+@CrossOrigin(origins = "http://localhost:5173", allowCredentials = "true")
+public class AuthController {
+
+    @PostMapping("/login")
+    public Map<String, String> login(@RequestBody Map<String, String> body, HttpSession session) {
+        if ("admin".equals(body.get("username")) && "1234".equals(body.get("password"))) {
+            session.setAttribute("user", "admin");
+            return Map.of("username", "admin");
+        }
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
+    }
+
+    @GetMapping("/me")
+    public Map<String, String> me(HttpSession session) {
+        Object user = session.getAttribute("user");
+        if (user == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
+        return Map.of("username", user.toString());
+    }
+
+    @PostMapping("/logout")
+    public void logout(HttpSession session) {
+        session.invalidate();
+    }
+}
+
+(If you’re on Spring Boot 2, import javax.servlet.http.HttpSession instead.)
+
+In StudentController, change the annotation so cookies are allowed:
+java
+@CrossOrigin(origins = "http://localhost:5173", allowCredentials = "true")
+
+Frontend setup
+
+bash
+npm install pinia vue-router
+
+src/main.js
+
+js
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import App from './App.vue'
+import router from './router'
+
+createApp(App).use(createPinia()).use(router).mount('#app')
+
+src/router/index.js
+
+js
+import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
+import Login from '../views/Login.vue'
+import Students from '../views/Students.vue'
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: '/', component: Students, meta: { requiresAuth: true } },
+    { path: '/login', component: Login }
+  ]
+})
+
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  if (!auth.checked) await auth.checkSession()   // restores session after page refresh
+  if (to.meta.requiresAuth && !auth.user) return '/login'
+  if (to.path === '/login' && auth.user) return '/'
+})
+
+export default router
+
+src/stores/auth.js
+
+js
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+
+const API = 'http://localhost:8080/api/auth'
+
+export const useAuthStore = defineStore('auth', () => {
+  const user = ref(null)
+  const checked = ref(false)
+
+  async function checkSession() {
+    const res = await fetch(`${API}/me`, { credentials: 'include' })
+    user.value = res.ok ? (await res.json()).username : null
+    checked.value = true
+  }
+
+  async function login(username, password) {
+    const res = await fetch(`${API}/login`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    })
+    if (!res.ok) return false
+    user.value = (await res.json()).username
+    return true
+  }
+
+  async function logout() {
+    await fetch(`${API}/logout`, { method: 'POST', credentials: 'include' })
+    user.value = null
+  }
+
+  return { user, checked, checkSession, login, logout }
+})
+
+src/stores/students.js
+
+js
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+
+const url = 'http://localhost:8080/api/Student'
+const opts = { credentials: 'include', headers: { 'Content-Type': 'application/json' } }
+
+export const useStudentStore = defineStore('students', () => {
+  const students = ref([])
+
+  async function load() {
+    const res = await fetch(url, { credentials: 'include' })
+    students.value = await res.json()
+  }
+
+  async function save(student, id) {
+    await fetch(id ? `${url}/${id}` : url, {
+      ...opts,
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify(student)
+    })
+    await load()
+  }
+
+  async function remove(id) {
+    await fetch(`${url}/${id}`, { method: 'DELETE', credentials: 'include' })
+    await load()
+  }
+
+  return { students, load, save, remove }
+})
+
+src/views/Login.vue
+
+vue
+<script setup>
+import { ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
+
+const auth = useAuthStore()
+const router = useRouter()
+const username = ref('')
+const password = ref('')
+const error = ref('')
+
+async function submit() {
+  const ok = await auth.login(username.value, password.value)
+  if (ok) router.push('/')
+  else error.value = 'Invalid username or password'
+}
+</script>
+
+<template>
+  <h1>Login</h1>
+  <form @submit.prevent="submit">
+    <input v-model="username" placeholder="Username" required />
+    <input v-model="password" type="password" placeholder="Password" required />
+    <button>Login</button>
+  </form>
+  <p v-if="error" style="color: red">{{ error }}</p>
+</template>
+
+src/views/Students.vue
+
+vue
+<script setup>
+import { ref, onMounted } from 'vue'
+import { useStudentStore } from '../stores/students'
+
+const store = useStudentStore()
+const name = ref('')
+const age = ref('')
+const editId = ref(null)
+
+async function save() {
+  await store.save({ name: name.value, age: Number(age.value) }, editId.value)
+  clearForm()
+}
+
+function edit(s) {
+  name.value = s.name
+  age.value = s.age
+  editId.value = s.id
+}
+
+function remove(id) {
+  if (confirm('Delete this student?')) store.remove(id)
+}
+
+function clearForm() {
+  name.value = ''
+  age.value = ''
+  editId.value = null
+}
+
+onMounted(store.load)
+</script>
+
+<template>
+  <h1>Student Management</h1>
+
+  <form @submit.prevent="save">
+    <input v-model="name" placeholder="Name" required />
+    <input v-model="age" type="number" placeholder="Age" required />
+    <button>{{ editId ? 'Update' : 'Add' }}</button>
+    <button type="button" @click="clearForm">Clear</button>
+  </form>
+
+  <table border="1" cellpadding="8">
+    <tr><th>Name</th><th>Age</th><th>Actions</th></tr>
+    <tr v-for="s in store.students" :key="s.id">
+      <td>{{ s.name }}</td>
+      <td>{{ s.age }}</td>
+      <td>
+        <button @click="edit(s)">Edit</button>
+        <button @click="remove(s.id)">Delete</button>
+      </td>
+    </tr>
+  </table>
+</template>
+
+src/App.vue
+
+vue
+<script setup>
+import { useRouter } from 'vue-router'
+import { useAuthStore } from './stores/auth'
+
+const auth = useAuthStore()
+const router = useRouter()
+
+async function logout() {
+  await auth.logout()
+  router.push('/login')
+}
+</script>
+
+<template>
+  <div v-if="auth.user">
+    Logged in as {{ auth.user }} <button @click="logout">Logout</button>
+  </div>
+  <router-view />
+</template>
